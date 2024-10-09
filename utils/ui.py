@@ -5,8 +5,8 @@ from OpenGL.GL.ARB.pixel_buffer_object import *
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
 
-# import pycuda.driver as cuda_driver
-# import pycuda.gl as cuda_gl
+import pycuda.driver as cuda_driver
+import pycuda.gl as cuda_gl
 
 import numpy as np
 import drjit as dr
@@ -68,10 +68,10 @@ class UI:
         self.vao = self.create_vao()
         self.texture = self.create_texture()
 
-        # import pycuda.gl.autoinit
-        # self.pbo = self.create_pbo(width, height)
-        # warnings.filterwarnings("ignore", category=DeprecationWarning)
-        # self.bufobj = cuda_gl.BufferObject(int(self.pbo))
+        import pycuda.gl.autoinit
+        self.pbo = self.create_pbo(width, height)
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        self.bufobj = cuda_gl.BufferObject(int(self.pbo))
 
     def close(self):
 

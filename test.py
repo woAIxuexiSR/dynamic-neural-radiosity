@@ -89,8 +89,8 @@ if __name__ == "__main__":
         img = torch.log1p(exposure * img)  # tone mapping
         img = img ** (1 / 2.2)  # gamma correction
 
-        # ui.write_texture_gpu(img)
-        ui.write_texture_cpu(img.cpu().numpy())
+        ui.write_texture_gpu(img)
+        # ui.write_texture_cpu(img.cpu().numpy())
         ui.end_frame()
 
     ui.close()
