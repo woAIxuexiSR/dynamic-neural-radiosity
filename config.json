@@ -1,0 +1,32 @@
+{
+    "scene": "scenes/dining-room/scene.xml",
+    "animation": "scenes/dining-room/animation.json",
+    "v": [0.0, 0.4, 0.6, 0.7, 0.2, 0.8, 0.50],
+    "output": "dining-room",
+    "train": {
+        "use_adaptive_surface": false,
+        "use_adaptive_rhs": true,
+        "loss": "normed_l2",
+        "rhs_samples": 32,
+        "batch_size": 16384,
+        "steps": 120000,
+        "learning_rate": 0.001,
+        "save_interval": 500,
+        "model_name": "vvmlp.pth"
+    },
+    "model": {
+        "type": "DNR",
+        
+        "grid_type": "HashGrid",
+        "n_levels": 4,
+        "n_features_per_level": 2,
+        "base_resolution": 32,
+        "per_level_scale": 2.0,
+
+        "n_neurons": 256,
+        "n_hidden_layers": 4,
+        "vvmlp_output_dims": 128,
+
+        "encoding_reduce": "concatenation"
+    }
+}
