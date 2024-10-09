@@ -27,7 +27,7 @@ Refer to [the document](https://mitsuba.readthedocs.io/en/stable/src/developer_g
     cmake -G "Visual Studio 17 2022" -A x64 -B build
 ```
 
-Change the `mitsuba.conf` file in the `build` directory to enable the `cuda_rgb` variant(about lin 86). Then build Mitsuba using:
+Change the `mitsuba.conf` file in the `build` directory to enable the `cuda_rgb` variant (~line 86). Then build Mitsuba using:
 
 ``` bash
     cmake --build build --config Release
