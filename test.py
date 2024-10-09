@@ -82,6 +82,7 @@ if __name__ == "__main__":
 
             imgui.tree_pop()
 
+        # fix seed to remove jitter in the LHS rendering
         seed = int(ui.duration * 1000)
 
         img = mi.render(scene, integrator=integrator, spp=spp, seed=seed).torch()

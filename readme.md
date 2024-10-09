@@ -1,5 +1,7 @@
 # Dynamic Neural Radiosity
 
+The code release for the paper "Dynamic Neural Radiosity with Multi-grid Decomposition" (SIGGRAPH Asia 2024).
+
 ## Platform and Dependencies
 
 * Windows 10 / Ubuntu 20.04
