@@ -1,18 +1,17 @@
 {
     "scene": "scenes/dining-room/scene.xml",
     "animation": "scenes/dining-room/animation.json",
-    "v": [0.0, 0.4, 0.6, 0.7, 0.2, 0.8, 0.50],
+    "v": [0.5, 0.4, 0.6, 0.7, 0.2, 0.8, 0.5],
     "output": "dining-room",
     "train": {
-        "use_adaptive_surface": false,
         "use_adaptive_rhs": true,
-        "loss": "normed_l2",
+        "loss": "normed_semi_l2",
         "rhs_samples": 32,
         "batch_size": 16384,
         "steps": 120000,
         "learning_rate": 0.001,
         "save_interval": 500,
-        "model_name": "vvmlp.pth"
+        "model_name": "model.pth"
     },
     "model": {
         "type": "DNR",

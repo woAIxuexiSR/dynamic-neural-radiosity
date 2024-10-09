@@ -12,13 +12,11 @@ import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 import tinycudann as tcnn
-from torch_scatter import scatter
 
 from integrators.lhs_rhs import *
 from integrators.integrator import *
 from dscene.dscene import DynamicScene
 from dscene.sample import *
-from dscene.mcmc import MarkovChainSampler
 from model.helper import *
 
             
@@ -40,8 +38,6 @@ def train(dscene, model, surface_weight, surface_mask, config, out_dir):
     tqdm_iter = tqdm(range(steps))
 
     batch_loss = 0
-    batch_surface_loss = np.zeros_like(surface_weight)
-    surface_area = surface_weight.copy()
     warm_up = 100
     v = np.random.uniform(0, 1, dscene.var_num)
 
@@ -74,11 +70,6 @@ def train(dscene, model, surface_weight, surface_mask, config, out_dir):
         out_lhs[~valid_lhs] = 0.0
         lhs = Le_lhs.torch() + out_lhs
 
-        # valid_rhs = valid_rhs.torch().bool()
-        # out_rhs[~valid_rhs] = 0.0
-        # rhs = Le_rhs.torch() + out_rhs * weight_rhs.torch()
-        # rhs = rhs.reshape(batch_size, M, 3).mean(dim=1)
-
         rhs = L_rhs.torch()
         rhs = rhs.reshape(batch_size, M, 3)
 
@@ -93,34 +84,6 @@ def train(dscene, model, surface_weight, surface_mask, config, out_dir):
         torch.cuda.empty_cache()
         dr.flush_malloc_cache()
         gc.collect()
-
-        if config.get("use_adaptive_surface", False) and step > steps // 3:
-            # compute surface residual
-            norm = (lhs + rhs) / 2 + 0.1
-            residual = ((lhs - rhs) / norm).detach()
-            residual = (residual * residual).sum(dim=1).sqrt()
-            shape_idx = torch.from_numpy(
-                np.array(shape_idx).astype(np.int64)).cuda()
-            surface_residual = scatter(
-                residual, shape_idx, dim=0, dim_size=m_area.shape[0], reduce="mean")
-            # surface_residual = surface_residual / surface_residual.sum()
-            batch_surface_loss += surface_residual.cpu().numpy()
-
-            # update surface weight
-            if step % 2000 == 1999:
-                avg_surface_loss = batch_surface_loss / 2000
-                new_surface_weight = surface_area * avg_surface_loss
-                new_surface_weight = new_surface_weight / new_surface_weight.sum()
-                batch_surface_loss[:] = 0
-
-                weight = 0.1
-                surface_weight = (
-                    surface_weight + avg_surface_loss * weight) / (1 + weight)
-                surface_weight[~surface_mask] = 0
-                cnt = surface_mask.sum()
-                surface_weight[surface_mask] = np.maximum(
-                    surface_weight[surface_mask], 0.1 / cnt)
-                surface_weight = surface_weight / surface_weight.sum()
 
         if step % save_interval == save_interval - 1:
             writer.add_scalar("loss", batch_loss / save_interval, step)
@@ -143,7 +106,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = json.load(open(args.c, "r"))
 
-    out_dir = "result/" + config["output"]
+    out_dir = config["output"]
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
 

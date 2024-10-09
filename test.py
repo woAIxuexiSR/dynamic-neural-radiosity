@@ -31,27 +31,27 @@ if __name__ == "__main__":
     dscene = DynamicScene(scene)
     dscene.load_animation(config["animation"])
 
+    v = np.random.uniform(0, 1, dscene.var_num)
+    if config["v"] != "":
+        v = np.array(config["v"])
+    dscene.update(v)
+
     # print(dscene.params)
 
     # prepare model
 
     model = get_model(config["model"]["type"], args.m,
                        bbox, config["model"], dscene.var_num)
-    torch.save(model.state_dict(), "model.pth")
     # rendering
 
     sensor: mi.Sensor = scene.sensors()[0]
     size = sensor.film().size()
-    to_sensor = sensor.world_transform().inverse()
 
     ui = UI(*size, dscene.camera)
-    denoiser = mi.OptixDenoiser(size, albedo=True, normals=True)
 
     int_type = 0
     spp = 1
-    use_antialiasing = False
     exposure = 1.0
-    use_denoiser = False
 
     path = mi.load_dict({"type": "path", "max_depth": 16})
     LHS = LHSIntegrator(model, config["train"])
@@ -78,32 +78,12 @@ if __name__ == "__main__":
             else:
                 integrator = RHS
 
-            _, use_antialiasing = imgui.checkbox(
-                "Anti-aliasing", use_antialiasing)
             _, exposure = imgui.slider_float("Exposure", exposure, 0.1, 5)
-            _, use_denoiser = imgui.checkbox("Denoise", use_denoiser)
 
             imgui.tree_pop()
 
         seed = int(ui.duration * 1000)
 
-        # aov = mi.load_dict({
-        #     'type': 'aov',
-        #     'aovs': 'albedo:albedo,normals:sh_normal,depth:depth',
-        #     'integrator': integrator
-        # })
-        # img = mi.render(scene, integrator=aov, spp=spp, seed=seed)
-
-        # albedo = img[:, :, 3:6].torch()
-        # normal = img[:, :, 6:9].torch()
-        # depth = img[:, :, 9:10].torch()
-        # img = img[:, :, :3].torch()
-
-        # if use_antialiasing:
-        #     img = cuda_extension.anti_aliasing(img, depth, albedo, normal)
-        # if use_denoiser:
-        #     img = denoiser(img, denoise_alpha=False, albedo=albedo, normals=normal,
-        #                    to_sensor=to_sensor).torch()
         img = mi.render(scene, integrator=integrator, spp=spp, seed=seed).torch()
 
         img = torch.log1p(exposure * img)  # tone mapping

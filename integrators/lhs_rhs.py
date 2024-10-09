@@ -237,8 +237,8 @@ def render_rhs(scene: mi.Scene, v: np.ndarray, sampler: mi.Sampler, si: mi.Surfa
     active_nr = active & ~null_face & si.is_valid(
     ) & not_emitter.x & not_emitter.y & not_emitter.z
 
-    pos, dirs, normals, albedo, roughness = extract_input(si)
-    out = model(pos, dirs, normals, albedo, roughness, v)
+    pos, dirs, normals, albedo = extract_input(si)
+    out = model(pos, dirs, normals, albedo, v)
 
     Le = mi.Color3f(result)
     result = dr.fma(

@@ -71,19 +71,10 @@ if __name__ == "__main__":
     iter_num = (args.s + max_spp_per_iter - 1) // max_spp_per_iter
     spp = args.s if iter_num == 1 else max_spp_per_iter
     
-    # start = time.time()
-    # for j in range(10):
     for i in range(iter_num):
-        start = time.time()
-
         img += mi.render(dscene.scene, integrator=integrator, spp=spp, seed=i + 2)
         dr.flush_malloc_cache()
-
-        torch.cuda.synchronize()
-        print("Time: ", time.time() - start)
     img = img / iter_num
-
-    # print("Time: ", time.time() - start)
     
     img = mi.Bitmap(img)
     img.write(args.o)

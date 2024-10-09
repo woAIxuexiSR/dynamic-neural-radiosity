@@ -34,7 +34,6 @@ class LHSIntegrator(mi.SamplingIntegrator):
             dr.sync_device()
             L, _, _, valid = render_lhs(scene, self.v, si, self.model)
 
-
         return L * throughput, valid & ~null_face, []
 
 
