@@ -126,6 +126,8 @@ For example:
 
 ## Run
 
+Note: The FXAA used in paper is not implemented in this project, where you can find here: https://github.com/mattdesl/glsl-fxaa.git.
+
 * train a model: `python train.py [-c config.json] [-m pre_trained_model]`
 * test ui: `python test.py [-c config.json] [-m pre_trained_model]`
 * render an image:  
