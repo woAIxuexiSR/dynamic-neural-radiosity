@@ -5,6 +5,7 @@ The code release for the paper "Dynamic Neural Radiosity with Multi-grid Decompo
 ## Platform and Dependencies
 
 * Windows 10 / Ubuntu 20.04
+* CUDA 12.2
 
 * Python 3.10
 * PyTorch 2.1.0
