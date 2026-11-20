@@ -68,14 +68,26 @@ class UI:
         self.vao = self.create_vao()
         self.texture = self.create_texture()
 
-        import pycuda.gl.autoinit
+        import pycuda.gl.autoinit as cuda_gl_autoinit
+        self.cuda_gl_context = cuda_gl_autoinit.context
+        self.torch_cuda_context = cuda_driver.Device(
+            torch.cuda.current_device()
+        ).retain_primary_context()
         self.pbo = self.create_pbo(width, height)
         warnings.filterwarnings("ignore", category=DeprecationWarning)
-        self.bufobj = cuda_gl.BufferObject(int(self.pbo))
+        self.bufobj = cuda_gl.RegisteredBuffer(
+            int(self.pbo),
+            cuda_gl.graphics_map_flags.WRITE_DISCARD,
+        )
 
     def close(self):
 
-        self.bufobj.unregister()
+        self.cuda_gl_context.push()
+        try:
+            self.bufobj.unregister()
+        finally:
+            cuda_driver.Context.pop()
+        self.torch_cuda_context.detach()
 
         glDeleteProgram(self.program)
         glDeleteVertexArrays(1, [self.vao])
@@ -214,19 +226,49 @@ class UI:
     # img: (height, width, 3) torch.float32
     def write_texture_gpu(self, img):
 
-        mapping = self.bufobj.map()
+        if not img.is_cuda or img.dtype != torch.float32 or not img.is_contiguous():
+            raise ValueError(
+                "write_texture_gpu() expects a contiguous CUDA float32 tensor"
+            )
+        if img.numel() != self.width * self.height * 3:
+            raise ValueError(
+                "write_texture_gpu() received an image with an unexpected size"
+            )
+
         sync = getattr(dr, "sync_device", None)
         if sync is None:
             sync = dr.sync_thread
         sync()
-        cuda_driver.memcpy_dtod(mapping.device_ptr(),
-                                img.data_ptr(), img.numel() * 4)
-        mapping.unmap()
+        torch.cuda.synchronize(img.device)
+
+        self.cuda_gl_context.push()
+        mapping = None
+        try:
+            mapping = self.bufobj.map()
+            device_ptr, mapped_size = mapping.device_ptr_and_size()
+            copy_size = img.numel() * img.element_size()
+            if mapped_size < copy_size:
+                raise RuntimeError(
+                    "Mapped OpenGL buffer is smaller than the rendered image"
+                )
+
+            cuda_driver.memcpy_peer(
+                device_ptr,
+                img.data_ptr(),
+                copy_size,
+                dest_context=self.cuda_gl_context,
+                src_context=self.torch_cuda_context,
+            )
+        finally:
+            if mapping is not None:
+                mapping.unmap()
+            cuda_driver.Context.pop()
 
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER_ARB, int(self.pbo))
         glBindTexture(GL_TEXTURE_2D, self.texture)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.width,
                         self.height, GL_RGB, GL_FLOAT, ctypes.c_void_p(0))
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER_ARB, 0)
 
     def end_frame(self):
         imgui.end()

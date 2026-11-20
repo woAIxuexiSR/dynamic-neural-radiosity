@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import tinycudann as tcnn
 import numpy as np
-import time
+from contextlib import nullcontext
 
 grid_config = {
     "otype": "HashGrid",
@@ -106,8 +106,41 @@ class DNR(nn.Module):
         self.vvmlp = tcnn.NetworkWithInputEncoding(var_num, self.vvmlp_output_dims, vvmlp_encoding_config, vvmlp_network_config)
         
         self.mlp = tcnn.Network(self.encoding.n_output_dims + self.vvmlp_output_dims, 3, network_config)
+
+        self.jit_fusion_requested = bool(
+            config.get("jit_fusion_encoding", True)
+        )
+        self.jit_fusion_supported = False
+        self.jit_fusion_modules = []
+        if self.jit_fusion_requested:
+            self.jit_fusion_supported = bool(tcnn.supports_jit_fusion())
+            if self.jit_fusion_supported:
+                self.encoding.jit_fusion = True
+                self.jit_fusion_modules.append("encoding")
+
+        print(
+            "tiny-cuda-nn encoding JIT fusion: "
+            f"requested={self.jit_fusion_requested}, "
+            f"supported={self.jit_fusion_supported}, "
+            f"enabled={self.jit_fusion_modules or 'none'}",
+            flush=True,
+        )
         
-    def _forward_torch(self, pos, wi, n, f_d, vars: np.ndarray):
+    def _forward_torch(
+        self,
+        pos,
+        wi,
+        n,
+        f_d,
+        vars: np.ndarray,
+        profiler=None,
+    ):
+        timer = (
+            profiler.measure
+            if profiler is not None
+            else lambda name: nullcontext()
+        )
+
         vars = torch.as_tensor(vars, device="cuda", dtype=torch.float32)
 
         # There are some NaN values due to scene.ray_intersect().
@@ -118,52 +151,71 @@ class DNR(nn.Module):
         n = (nn.functional.normalize(n, dim=1) + 1) * 0.5
 
         var_num = self.var_num
-        x = torch.zeros((pos.shape[0], 3 + 3 * var_num * 2), device="cuda")
-        x[:, :3] = pos
-        for i in range(var_num):
-            x[:, 3 + i * 6] = pos[:, 0]
-            x[:, 3 + i * 6 + 1] = vars[i]
-            x[:, 3 + i * 6 + 2] = pos[:, 1]
-            x[:, 3 + i * 6 + 3] = vars[i]
-            x[:, 3 + i * 6 + 4] = pos[:, 2]
-            x[:, 3 + i * 6 + 5] = vars[i]
-        x = torch.cat([x, wi, n, f_d], dim=1).to(torch.float32)
-        
-        x = self.encoding(x)
+        pos_per_var = pos[:, None, :].expand(-1, var_num, -1)
+        var_per_pos = vars.view(1, var_num, 1).expand(pos.shape[0], -1, 3)
+        variable_input = torch.stack(
+            (pos_per_var, var_per_pos), dim=-1
+        ).reshape(pos.shape[0], var_num * 6)
+        x = torch.cat([pos, variable_input, wi, n, f_d], dim=1)
 
-        v = torch.zeros((pos.shape[0], var_num), device="cuda")
-        for i in range(var_num):
-            v[:, i] = vars[i]
+        v = vars.view(1, var_num).expand(pos.shape[0], -1).contiguous()
+
+        with timer("model.encoding"):
+            x = self.encoding(x)
+
         v = self.vvmlp(v)
 
-        x = self.mlp(torch.cat([x, v], dim=1)).to(torch.float32).abs()
-        
+        with timer("model.head_mlp"):
+            x = self.mlp(torch.cat([x, v], dim=1)).to(torch.float32).abs()
+
         return x
 
-    def forward(self, pos, dirs, normal, albedo, vars: np.ndarray):
-        with dr.suspend_grad():
-            pos = ((pos - self.bb_min) / (self.bb_max - self.bb_min)).torch().transpose(0, 1)
-            wi = dirs.torch().transpose(0, 1)
-            n = normal.torch().transpose(0, 1)
-            f_d = albedo.torch().transpose(0, 1)
+    def forward(
+        self,
+        pos,
+        dirs,
+        normal,
+        albedo,
+        vars: np.ndarray,
+        profiler=None,
+    ):
+        timer = (
+            profiler.measure
+            if profiler is not None
+            else lambda name: nullcontext()
+        )
 
-        return self._forward_torch(pos, wi, n, f_d, vars)
+        with timer("model.drjit_to_torch"):
+            with dr.suspend_grad():
+                pos = (pos - self.bb_min) / (self.bb_max - self.bb_min)
+                packed = dr.stack(
+                    [
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                        dirs.x,
+                        dirs.y,
+                        dirs.z,
+                        normal.x,
+                        normal.y,
+                        normal.z,
+                        albedo.x,
+                        albedo.y,
+                        albedo.z,
+                    ],
+                    axis=0,
+                ).torch()
+                pos, wi, n, f_d = (
+                    packed.reshape(4, 3, -1)
+                    .transpose(1, 2)
+                    .unbind(0)
+                )
 
-    def forward_mitsuba(self, pos, dirs, normal, albedo, vars: np.ndarray):
-        pos = (pos - self.bb_min) / (self.bb_max - self.bb_min)
-
-        @dr.wrap(source="drjit", target="torch")
-        def evaluate(px, py, pz, wx, wy, wz, nx, ny, nz, ax, ay, az):
-            pos_t = torch.stack((px, py, pz), dim=1)
-            wi_t = torch.stack((wx, wy, wz), dim=1)
-            normal_t = torch.stack((nx, ny, nz), dim=1)
-            albedo_t = torch.stack((ax, ay, az), dim=1)
-            output = self._forward_torch(pos_t, wi_t, normal_t, albedo_t, vars)
-            return output[:, 0], output[:, 1], output[:, 2]
-
-        return evaluate(
-            pos.x, pos.y, pos.z,
-            dirs.x, dirs.y, dirs.z,
-            normal.x, normal.y, normal.z,
-            albedo.x, albedo.y, albedo.z,
+        return self._forward_torch(
+            pos,
+            wi,
+            n,
+            f_d,
+            vars,
+            profiler,
         )

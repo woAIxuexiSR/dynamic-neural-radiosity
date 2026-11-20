@@ -6,9 +6,11 @@ import numpy as np
 import json
 import argparse
 import os
+from contextlib import nullcontext
 
 from dscene.dscene import DynamicScene
 from integrators.integrator import *
+from utils.profiler import RenderProfiler
 
 mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
 
@@ -21,13 +23,35 @@ if __name__ == "__main__":
     parser.add_argument("-c", type=str, default="config.json")
     parser.add_argument("-m", type=str, default="")
     parser.add_argument("-o", type=str, default="hello.exr")
+    parser.add_argument(
+        "--jit-fusion-encoding",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable tiny-cuda-nn JIT fusion for the main encoding.",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print synchronized timing for setup, render passes, and output.",
+    )
 
     args = parser.parse_args()
     config = json.load(open(args.c, "r"))
+    if args.jit_fusion_encoding is not None:
+        config.setdefault("model", {})["jit_fusion_encoding"] = (
+            args.jit_fusion_encoding
+        )
+    profiler = None
 
     # prepare scene
 
-    scene: mi.Scene = mi.load_file(config["scene"], optimize=False)
+    if args.profile:
+        profiler = RenderProfiler(0)
+
+    timer = profiler.measure if profiler is not None else lambda _: nullcontext()
+
+    with timer("scene.load"):
+        scene: mi.Scene = mi.load_file(config["scene"], optimize=False)
     bbox = scene.bbox()
 
     dscene = DynamicScene(scene)
@@ -54,13 +78,20 @@ if __name__ == "__main__":
         
         from model.helper import get_model
 
-        model = get_model(config["model"]["type"], args.m, bbox, config["model"], dscene.var_num)
+        with timer("model.load"):
+            model = get_model(
+                config["model"]["type"],
+                args.m,
+                bbox,
+                config["model"],
+                dscene.var_num,
+            )
         
         if args.t == "LHS":
-            integrator = LHSIntegrator(model)
+            integrator = LHSIntegrator(model, profiler=profiler)
             integrator.v = v
         elif args.t == "RHS":
-            integrator = RHSIntegrator(model)
+            integrator = RHSIntegrator(model, profiler=profiler)
             integrator.v = v
             
     else:
@@ -75,17 +106,28 @@ if __name__ == "__main__":
     max_spp_per_iter = 1024 if args.t == "path" else 1
     iter_num = (args.s + max_spp_per_iter - 1) // max_spp_per_iter
     spp = args.s if iter_num == 1 else max_spp_per_iter
+    if profiler is not None:
+        profiler.passes = iter_num
     
     for i in range(iter_num):
-        img += mi.render(
-            scene=dscene.scene,
-            sensor=sensor,
-            integrator=integrator,
-            spp=spp,
-            seed=i,
-        )
-        dr.flush_malloc_cache()
+        pass_scope = profiler.pass_scope() if profiler is not None else nullcontext()
+        with pass_scope:
+            with timer("render.pass"):
+                rendered = mi.render(
+                    scene=dscene.scene,
+                    sensor=sensor,
+                    integrator=integrator,
+                    spp=spp,
+                    seed=i,
+                )
+            img += rendered
+            dr.flush_malloc_cache()
+
     img = img / iter_num
     
     img = mi.Bitmap(img)
-    img.write(args.o)
+    with timer("image.write"):
+        img.write(args.o)
+
+    if profiler is not None:
+        profiler.report()

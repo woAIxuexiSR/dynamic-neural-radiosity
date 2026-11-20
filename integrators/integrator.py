@@ -2,7 +2,7 @@ import torch
 
 import mitsuba as mi
 import drjit as dr
-import time
+from contextlib import nullcontext
 import os
 
 from integrators.lhs_rhs import *
@@ -19,11 +19,15 @@ def sync_drjit():
 
 class LHSIntegrator(mi.SamplingIntegrator):
 
-    def __init__(self, model, config: dict={}):
+    def __init__(self, model, config: dict={}, profiler=None):
         super().__init__(mi.Properties())
         self.model = model
         self.v = None
         self.config = config
+        self.profiler = profiler
+
+    def _measure(self, name):
+        return self.profiler.measure(name) if self.profiler is not None else nullcontext()
 
     def sample(
         self,
@@ -39,21 +43,32 @@ class LHSIntegrator(mi.SamplingIntegrator):
 
             ray = mi.Ray3f(ray)
 
-            si, throughput, null_face, _ = first_smooth(scene, sampler, ray, active)
+            with self._measure("integrator.first_smooth"):
+                si, throughput, null_face, _ = first_smooth(
+                    scene, sampler, ray, active)
             sync_drjit()
             L, _, _, valid = render_lhs(
-                scene, self.v, si, self.model, use_mitsuba_model=True)
+                scene,
+                self.v,
+                si,
+                self.model,
+                profiler=self.profiler,
+            )
 
         return L * throughput, valid & ~null_face
 
 
 class RHSIntegrator(mi.SamplingIntegrator):
 
-    def __init__(self, model, config: dict={}):
+    def __init__(self, model, config: dict={}, profiler=None):
         super().__init__(mi.Properties())
         self.model = model
         self.v = None
         self.config = config
+        self.profiler = profiler
+
+    def _measure(self, name):
+        return self.profiler.measure(name) if self.profiler is not None else nullcontext()
 
     def sample(
         self,
@@ -69,10 +84,18 @@ class RHSIntegrator(mi.SamplingIntegrator):
 
             ray = mi.Ray3f(ray)
 
-            si, throughput, null_face, _ = first_smooth(scene, sampler, ray, active)
+            with self._measure("integrator.first_smooth"):
+                si, throughput, null_face, _ = first_smooth(
+                    scene, sampler, ray, active)
             sync_drjit()
             L, _, _, _, valid = render_rhs(
-                scene, self.v, sampler, si, self.model, use_mitsuba_model=True)
+                scene,
+                self.v,
+                sampler,
+                si,
+                self.model,
+                profiler=self.profiler,
+            )
 
         return L * throughput, valid & ~null_face
 

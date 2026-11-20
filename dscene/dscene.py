@@ -387,4 +387,7 @@ class DynamicScene:
 
             imgui.tree_pop()
 
+        if not self.active_moving_camera:
+            self.params[self.camera_to_world_key] = self.camera.get_transform()
+
         self.update(self.v, changed)

@@ -94,7 +94,7 @@ def render_lhs(
     v: np.ndarray,
     si: mi.SurfaceInteraction3f,
     model,
-    use_mitsuba_model: bool = False,
+    profiler=None,
 ):
 
 
@@ -108,16 +108,19 @@ def render_lhs(
 
 
         pos, dirs, normals, albedo = extract_input(si)
-        if use_mitsuba_model:
-            out = model.forward_mitsuba(pos, dirs, normals, albedo, v)
-            out_mi = mi.Color3f(*out)
-        else:
-            out = model(pos, dirs, normals, albedo, v)
-            out_mi = mi.Color3f(
-                mi.Float(out[:, 0].contiguous()),
-                mi.Float(out[:, 1].contiguous()),
-                mi.Float(out[:, 2].contiguous()),
-            )
+        out = model(
+            pos,
+            dirs,
+            normals,
+            albedo,
+            v,
+            profiler=profiler,
+        )
+        out_mi = mi.Color3f(
+            mi.Float(out[:, 0].contiguous()),
+            mi.Float(out[:, 1].contiguous()),
+            mi.Float(out[:, 2].contiguous()),
+        )
 
         not_emitter = (Le.x == 0.0) & (Le.y == 0.0) & (Le.z == 0.0)
         active_nr = valid & not_emitter
@@ -134,8 +137,11 @@ def render_rhs(
     sampler: mi.Sampler,
     si: mi.SurfaceInteraction3f,
     model,
-    use_mitsuba_model: bool = False,
+    profiler=None,
 ):
+
+    if profiler is not None:
+        profiler.start_segment("rhs.path_core")
 
     si: mi.SurfaceInteraction3f = mi.SurfaceInteraction3f(si)
     ray: mi.Ray3f = mi.Ray3f(si.p, si.to_world(si.wi))
@@ -255,21 +261,27 @@ def render_rhs(
         result
     )
 
+    if profiler is not None:
+        profiler.stop_segment("rhs.path_core")
+
     emission = si.emitter(scene).eval(si)
     not_emitter = (emission.x == 0.0) & (emission.y == 0.0) & (emission.z == 0.0)
     active_nr = active & ~null_face & si.is_valid() & not_emitter
 
     pos, dirs, normals, albedo = extract_input(si)
-    if use_mitsuba_model:
-        out = model.forward_mitsuba(pos, dirs, normals, albedo, v)
-        out_mi = mi.Color3f(*out)
-    else:
-        out = model(pos, dirs, normals, albedo, v)
-        out_mi = mi.Color3f(
-            mi.Float(out[:, 0].contiguous()),
-            mi.Float(out[:, 1].contiguous()),
-            mi.Float(out[:, 2].contiguous()),
-        )
+    out = model(
+        pos,
+        dirs,
+        normals,
+        albedo,
+        v,
+        profiler=profiler,
+    )
+    out_mi = mi.Color3f(
+        mi.Float(out[:, 0].contiguous()),
+        mi.Float(out[:, 1].contiguous()),
+        mi.Float(out[:, 2].contiguous()),
+    )
 
     Le = mi.Color3f(result)
     result = dr.fma(

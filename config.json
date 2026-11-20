@@ -10,11 +10,13 @@
         "batch_size": 16384,
         "steps": 120000,
         "learning_rate": 0.001,
-        "save_interval": 500,
+        "loss_interval": 500,
+        "save_interval": 10000,
         "model_name": "model.pth"
     },
     "model": {
         "type": "DNR",
+        "jit_fusion_encoding": true,
         
         "grid_type": "HashGrid",
         "n_levels": 4,

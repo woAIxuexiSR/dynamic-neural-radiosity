@@ -47,24 +47,29 @@ source mitsuba/build/setpath.sh
 **Train a model:**
 
 ```bash
-python train.py [-c config.json] [-m pretrained_model.pth]
+python train.py [-c config.json] [-m pretrained_model.pth] [--profile-steps steps] [--jit-fusion-encoding | --no-jit-fusion-encoding]
 ```
+
+- `--profile-steps`: run only the specified number of steps and print profiling statistics
+- `--jit-fusion-encoding` / `--no-jit-fusion-encoding`: enable or disable tiny-cuda-nn JIT fusion for the encoding; enabled by default
 
 **Interactive viewer:**
 
 ```bash
-python test.py [-c config.json] [-m pretrained_model.pth]
+python test.py [-c config.json] [-m pretrained_model.pth] [--jit-fusion-encoding | --no-jit-fusion-encoding]
 ```
 
 **Render an image:**
 
 ```bash
-python render_img.py [-t type] [-s spp] [-c config.json] [-m pretrained_model.pth] [-o output.exr]
+python render_img.py [-t type] [-s spp] [-c config.json] [-m pretrained_model.pth] [-o output.exr] [--profile] [--jit-fusion-encoding | --no-jit-fusion-encoding]
 ```
 
 - `-t`: rendering method — `LHS`, `RHS`, or `path`
 - `-s`: samples per pixel
 - `-o`: output file path
+- `--profile`: print synchronized render profiling statistics
+- `--jit-fusion-encoding` / `--no-jit-fusion-encoding`: enable or disable tiny-cuda-nn JIT fusion for the encoding; enabled by default
 
 > **Note:** The FXAA post-processing used in the paper is not included. See [glsl-fxaa](https://github.com/mattdesl/glsl-fxaa) for a reference implementation.
 
@@ -87,6 +92,7 @@ python render_img.py [-t type] [-s spp] [-c config.json] [-m pretrained_model.pt
 | `batch_size` | Batch size |
 | `steps` | Number of training steps |
 | `learning_rate` | Learning rate |
+| `loss_interval` | TensorBoard loss logging interval (in steps) |
 | `save_interval` | Model checkpoint interval (in steps) |
 | `model_name` | Checkpoint filename |
 
@@ -121,7 +127,8 @@ python render_img.py [-t type] [-s spp] [-c config.json] [-m pretrained_model.pt
         "batch_size": 16384,
         "steps": 120000,
         "learning_rate": 0.001,
-        "save_interval": 500,
+        "loss_interval": 500,
+        "save_interval": 10000,
         "model_name": "model.pth"
     },
     "model": {

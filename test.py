@@ -20,9 +20,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dynamic Neural Radiosity")
     parser.add_argument("-c", type=str, default="config.json")
     parser.add_argument("-m", type=str, default="")
+    parser.add_argument(
+        "--jit-fusion-encoding",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable tiny-cuda-nn JIT fusion for the main encoding.",
+    )
 
     args = parser.parse_args()
     config = json.load(open(args.c, "r"))
+    if args.jit_fusion_encoding is not None:
+        config.setdefault("model", {})["jit_fusion_encoding"] = (
+            args.jit_fusion_encoding
+        )
 
     # prepare scene
 
@@ -43,6 +53,7 @@ if __name__ == "__main__":
 
     model = get_model(config["model"]["type"], args.m,
                        bbox, config["model"], dscene.var_num)
+    model.eval()
     # rendering
 
     sensor: mi.Sensor = scene.sensors()[0]
@@ -57,42 +68,50 @@ if __name__ == "__main__":
     path = mi.load_dict({"type": "path", "max_depth": 16})
     LHS = LHSIntegrator(model, config["train"])
     RHS = RHSIntegrator(model, config["train"])
+    integrator = path
 
-    while not ui.should_close():
+    try:
+        while not ui.should_close():
 
-        ui.begin_frame()
-        dscene.render_ui()
+            ui.begin_frame()
+            dscene.render_ui()
 
-        LHS.v = dscene.v
-        RHS.v = dscene.v
+            LHS.v = dscene.v
+            RHS.v = dscene.v
 
-        if imgui.tree_node("Render Options", imgui.TREE_NODE_DEFAULT_OPEN):
+            if imgui.tree_node("Render Options", imgui.TREE_NODE_DEFAULT_OPEN):
 
-            _, int_type = imgui.combo("Integrator", int_type, [
-                                      "Path", "LHS", "RHS"])
-            _, spp = imgui.slider_int("SPP", spp, 1, 4)
+                _, int_type = imgui.combo("Integrator", int_type, [
+                                          "Path", "LHS", "RHS"])
+                _, spp = imgui.slider_int("SPP", spp, 1, 4)
 
-            if int_type == 0:
-                integrator = path
-            elif int_type == 1:
-                integrator = LHS
-            else:
-                integrator = RHS
+                if int_type == 0:
+                    integrator = path
+                elif int_type == 1:
+                    integrator = LHS
+                else:
+                    integrator = RHS
 
-            _, exposure = imgui.slider_float("Exposure", exposure, 0.1, 5)
+                _, exposure = imgui.slider_float("Exposure", exposure, 0.1, 5)
 
-            imgui.tree_pop()
+                imgui.tree_pop()
 
-        # fix seed to remove jitter in the LHS rendering
-        seed = int(ui.duration * 1000)
+            # Keep samples stable while editing the scene or camera.
+            seed = 0
 
-        img = mi.render(scene, integrator=integrator, spp=spp, seed=seed).torch()
+            img = mi.render(
+                scene,
+                integrator=integrator,
+                spp=spp,
+                seed=seed,
+            ).torch()
 
-        img = torch.log1p(exposure * img)  # tone mapping
-        img = img ** (1 / 2.2)  # gamma correction
+            img = torch.log1p(exposure * img)  # tone mapping
+            img = (img ** (1 / 2.2)).contiguous()  # gamma correction
 
-        ui.write_texture_gpu(img)
-        # ui.write_texture_cpu(img.cpu().numpy())
-        ui.end_frame()
+            ui.write_texture_gpu(img)
+            # ui.write_texture_cpu(img.cpu().numpy())
+            ui.end_frame()
 
-    ui.close()
+    finally:
+        ui.close()
