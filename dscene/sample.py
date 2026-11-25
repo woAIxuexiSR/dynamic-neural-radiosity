@@ -25,14 +25,13 @@ def compute_area(scene: mi.Scene):
 
 def sample_si(
     scene: mi.Scene,
-    m_area,
+    surface_distribution: mi.DiscreteDistribution,
     sample1: mi.Float,
     sample2: mi.Point2f,
     sample3: mi.Point2f,
     active=True,
 ) -> mi.SurfaceInteraction3f:
-    sampler = mi.DiscreteDistribution(m_area)
-    shape_idx = sampler.sample(sample1, active)
+    shape_idx = surface_distribution.sample(sample1, active)
     shapes: mi.Shape = dr.gather(mi.ShapePtr, scene.shapes_dr(), shape_idx, active)
 
     ps = shapes.sample_position(0, sample2, active)

@@ -58,6 +58,7 @@ def train(
 
     l_sampler: mi.Sampler = mi.load_dict({"type": "independent"})
     r_sampler: mi.Sampler = mi.load_dict({"type": "independent"})
+    surface_distribution = mi.DiscreteDistribution(surface_weight)
 
     model.train()
     for step in tqdm_iter:
@@ -82,7 +83,7 @@ def train(
 
         shape_idx, si_lhs = sample_si(
             scene,
-            surface_weight,
+            surface_distribution,
             l_sampler.next_1d(),
             l_sampler.next_2d(),
             l_sampler.next_2d(),

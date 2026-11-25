@@ -11,6 +11,19 @@ from dscene.camera import FPSCamera, MovingCamera
 mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
 
 
+def opaque_animation_values(v):
+    values = np.asarray(v, dtype=np.float32)
+    if mi.variant().startswith("scalar"):
+        return values
+    return dr.opaque(mi.Float(values))
+
+
+def animation_value(values, idx):
+    if isinstance(values, np.ndarray):
+        return float(values[idx])
+    return dr.gather(mi.Float, values, idx)
+
+
 def val_to_str(value):
     if isinstance(value, mi.Vector3f):
         return "[{:.2f}, {:.2f}, {:.2f}]".format(value.x[0], value.y[0], value.z[0])
@@ -215,12 +228,13 @@ class DynamicScene:
 
     # v : list of [0, 1] that represents the progress of each animation
     def update(self, v: np.ndarray, changed=True):
+        opaque_v = opaque_animation_values(v)
 
         # update common states
         common_states = {}
         for idx, (param_name, start, end) in self.common_vars.items():
             if not changed: continue
-            c = dr.lerp(start, end, v[idx])
+            c = dr.lerp(start, end, animation_value(opaque_v, idx))
             if common_states.get(param_name) is None:
                 common_states[param_name] = c
             else:
@@ -232,7 +246,7 @@ class DynamicScene:
         translate_states = {}
         for idx, (shape_names, start, end) in self.translate_vars.items():
             if not changed: continue
-            c = dr.lerp(start, end, v[idx])
+            c = dr.lerp(start, end, animation_value(opaque_v, idx))
             for shape_name in shape_names:
                 if translate_states.get(shape_name) is None:
                     translate_states[shape_name] = c
@@ -251,7 +265,7 @@ class DynamicScene:
         # update rotate
         for idx, (shape_names, axis, translation, start, end) in self.rotate_vars.items():
             if not changed: continue
-            c = dr.lerp(start, end, v[idx])
+            c = dr.lerp(start, end, animation_value(opaque_v, idx))
             T = mi.Transform4f.translate(
                 translation) @ mi.Transform4f.rotate(axis, c) @ mi.Transform4f.translate(-translation)
             for shape_name in shape_names:
@@ -264,7 +278,7 @@ class DynamicScene:
         # update scale
         for idx, (shape_names, start, end) in self.scale_vars.items():
             if not changed: continue
-            c = dr.lerp(start, end, v[idx])
+            c = dr.lerp(start, end, animation_value(opaque_v, idx))
             for shape_name in shape_names:
                 if self.is_obj[shape_name]:
                     T = mi.Transform4f.scale(c)
@@ -284,10 +298,11 @@ class DynamicScene:
         multi_move_states = {}
         for idx, (shape_names, starts, ends) in self.multi_move_vars.items():
             if not changed: continue
+            value = animation_value(opaque_v, idx)
             for i, shape_name in enumerate(shape_names):
                 start = mi.Vector3f(starts[i].unsqueeze(0))
                 end = mi.Vector3f(ends[i].unsqueeze(0))
-                c = dr.lerp(start, end, v[idx])
+                c = dr.lerp(start, end, value)
                 if multi_move_states.get(shape_name) is None:
                     multi_move_states[shape_name] = c
                 else:
@@ -314,6 +329,7 @@ class DynamicScene:
         import imgui
 
         changed = False
+        opaque_v = opaque_animation_values(self.v)
 
         if imgui.tree_node("Camera Control", imgui.TREE_NODE_DEFAULT_OPEN):
 
@@ -340,7 +356,7 @@ class DynamicScene:
         if imgui.tree_node("Variable Control", imgui.TREE_NODE_DEFAULT_OPEN):
 
             for idx, (param_name, start, end) in self.common_vars.items():
-                c = dr.lerp(start, end, self.v[idx])
+                c = dr.lerp(start, end, animation_value(opaque_v, idx))
                 imgui.text(param_name + " : " + val_to_str(c))
                 _c, v = imgui.slider_float(
                     "variable " + str(idx), self.v[idx], 0.01, 0.99, "%.2f")
@@ -348,7 +364,7 @@ class DynamicScene:
                 self.v[idx] = v
 
             for idx, (shape_names, start, end) in self.translate_vars.items():
-                c = dr.lerp(start, end, self.v[idx])
+                c = dr.lerp(start, end, animation_value(opaque_v, idx))
                 param_name = str(shape_names) + " translate"
                 imgui.text(param_name + " : " + val_to_str(c))
                 _c, v = imgui.slider_float(
@@ -357,7 +373,7 @@ class DynamicScene:
                 self.v[idx] = v
 
             for idx, (shape_names, _, _, start, end) in self.rotate_vars.items():
-                c = dr.lerp(start, end, self.v[idx])
+                c = dr.lerp(start, end, animation_value(opaque_v, idx))
                 param_name = str(shape_names) + " rotate"
                 imgui.text(param_name + " : " + val_to_str(c))
                 _c, v = imgui.slider_float(
@@ -366,7 +382,7 @@ class DynamicScene:
                 self.v[idx] = v
 
             for idx, (shape_names, start, end) in self.scale_vars.items():
-                c = dr.lerp(start, end, self.v[idx])
+                c = dr.lerp(start, end, animation_value(opaque_v, idx))
                 param_name = str(shape_names) + " scale"
                 imgui.text(param_name + " : " + val_to_str(c))
                 _c, v = imgui.slider_float(
@@ -377,7 +393,7 @@ class DynamicScene:
             for idx, (shape_names, starts, ends) in self.multi_move_vars.items():
                 start = mi.Vector3f(starts[0].unsqueeze(0))
                 end = mi.Vector3f(ends[0].unsqueeze(0))
-                c = dr.lerp(start, end, self.v[idx])
+                c = dr.lerp(start, end, animation_value(opaque_v, idx))
                 param_name = str(shape_names) + " multi-move"
                 imgui.text(param_name + " : " + val_to_str(c))
                 _c, v = imgui.slider_float(
