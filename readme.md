@@ -4,15 +4,49 @@ The code release for the paper "Dynamic Neural Radiosity with Multi-grid Decompo
 
 ## Requirements
 
-**Platform**
-- Windows 10 / Ubuntu 20.04
-- CUDA 12.2
+**Tested environment**
 
-**Dependencies**
-- Python 3.10
-- PyTorch 2.1.0
-- [tiny-cuda-nn](https://github.com/NVlabs/tiny-cuda-nn)
-- numpy, imgui, pyopengl, pycuda
+- Ubuntu 22.04
+- Python 3.12.16
+- CUDA Toolkit 12.6
+- PyTorch 2.7.1 with CUDA 12.6
+- [tiny-cuda-nn](https://github.com/NVlabs/tiny-cuda-nn) 2.0
+- Mitsuba 3.10.0.dev1, pinned to commit
+  `aa01500f57770a4ef0b067693cae08b3e8a2ac73`
+- Dr.Jit 1.6.0.dev1
+
+The interactive viewer in `test.py` additionally requires `imgui`,
+`PyOpenGL`, `pycuda`, and `glfw`. These packages are not required for
+training or offline rendering with `render_img.py`.
+
+## Cloning the Repository
+
+Clone the repository together with the pinned Mitsuba source tree:
+
+```bash
+git clone --recurse-submodules <repository-url>
+cd dynamic-neural-radiosity
+```
+
+For an existing clone:
+
+```bash
+git submodule update --init --recursive
+```
+
+The pretrained model is optional and is stored with Git LFS. It is only needed
+when passing `-m pretrained_model/dining-room/model.pth`. To download it:
+
+```bash
+git lfs install
+git lfs pull --include="pretrained_model/dining-room/model.pth"
+```
+
+To skip the pretrained model when Git LFS is already installed:
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 git clone --recurse-submodules <repository-url>
+```
 
 ## Compiling Mitsuba 3 from Source
 
