@@ -1,8 +1,9 @@
 import mitsuba as mi
 import drjit as dr
 import numpy as np
+import os
 
-mi.set_variant("cuda_rgb")
+mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
 
 
 def compute_area(scene: mi.Scene):

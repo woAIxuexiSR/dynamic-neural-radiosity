@@ -1,14 +1,16 @@
+import torch
+
 import mitsuba as mi
 import drjit as dr
 import numpy as np
 import json
 import argparse
+import os
 
 from dscene.dscene import DynamicScene
 from integrators.integrator import *
-from model.helper import *
 
-mi.set_variant("cuda_rgb")
+mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
 
 
 if __name__ == "__main__":
@@ -25,7 +27,7 @@ if __name__ == "__main__":
 
     # prepare scene
 
-    scene: mi.Scene = mi.load_file(config["scene"])
+    scene: mi.Scene = mi.load_file(config["scene"], optimize=False)
     bbox = scene.bbox()
 
     dscene = DynamicScene(scene)
@@ -50,6 +52,8 @@ if __name__ == "__main__":
         
         # prepare model
         
+        from model.helper import get_model
+
         model = get_model(config["model"]["type"], args.m, bbox, config["model"], dscene.var_num)
         
         if args.t == "LHS":
@@ -65,6 +69,7 @@ if __name__ == "__main__":
     dscene.update(v)
     
     size = dscene.scene.sensors()[0].film().size()
+    sensor = dscene.scene.sensors()[0]
     img: mi.TensorXf = dr.zeros(mi.TensorXf, (size[1], size[0], 3))
     
     max_spp_per_iter = 1024 if args.t == "path" else 1
@@ -72,7 +77,13 @@ if __name__ == "__main__":
     spp = args.s if iter_num == 1 else max_spp_per_iter
     
     for i in range(iter_num):
-        img += mi.render(dscene.scene, integrator=integrator, spp=spp, seed=i + 2)
+        img += mi.render(
+            scene=dscene.scene,
+            sensor=sensor,
+            integrator=integrator,
+            spp=spp,
+            seed=i,
+        )
         dr.flush_malloc_cache()
     img = img / iter_num
     

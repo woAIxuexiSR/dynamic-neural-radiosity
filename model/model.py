@@ -107,22 +107,15 @@ class DNR(nn.Module):
         
         self.mlp = tcnn.Network(self.encoding.n_output_dims + self.vvmlp_output_dims, 3, network_config)
         
-    def forward(self, pos, dirs, normal, albedo, vars: np.ndarray):
+    def _forward_torch(self, pos, wi, n, f_d, vars: np.ndarray):
+        vars = torch.as_tensor(vars, device="cuda", dtype=torch.float32)
 
+        # There are some NaN values due to scene.ray_intersect().
+        wi = wi.nan_to_num(0.0)
+        n = n.nan_to_num(0.0)
 
-        with dr.suspend_grad():
-            pos = ((pos - self.bb_min) / (self.bb_max - self.bb_min)).torch()
-            wi = dirs.torch()
-            n = normal.torch()
-            f_d = albedo.torch()
-            vars = torch.from_numpy(vars)
-            
-            # there are some nan values due to scene.ray_intersect()
-            wi[wi.isnan()] = 0.0
-            n[n.isnan()] = 0.0
-
-            wi = (nn.functional.normalize(wi, dim=1) + 1) * 0.5
-            n = (nn.functional.normalize(n, dim=1) + 1) * 0.5
+        wi = (nn.functional.normalize(wi, dim=1) + 1) * 0.5
+        n = (nn.functional.normalize(n, dim=1) + 1) * 0.5
 
         var_num = self.var_num
         x = torch.zeros((pos.shape[0], 3 + 3 * var_num * 2), device="cuda")
@@ -146,3 +139,31 @@ class DNR(nn.Module):
         x = self.mlp(torch.cat([x, v], dim=1)).to(torch.float32).abs()
         
         return x
+
+    def forward(self, pos, dirs, normal, albedo, vars: np.ndarray):
+        with dr.suspend_grad():
+            pos = ((pos - self.bb_min) / (self.bb_max - self.bb_min)).torch().transpose(0, 1)
+            wi = dirs.torch().transpose(0, 1)
+            n = normal.torch().transpose(0, 1)
+            f_d = albedo.torch().transpose(0, 1)
+
+        return self._forward_torch(pos, wi, n, f_d, vars)
+
+    def forward_mitsuba(self, pos, dirs, normal, albedo, vars: np.ndarray):
+        pos = (pos - self.bb_min) / (self.bb_max - self.bb_min)
+
+        @dr.wrap(source="drjit", target="torch")
+        def evaluate(px, py, pz, wx, wy, wz, nx, ny, nz, ax, ay, az):
+            pos_t = torch.stack((px, py, pz), dim=1)
+            wi_t = torch.stack((wx, wy, wz), dim=1)
+            normal_t = torch.stack((nx, ny, nz), dim=1)
+            albedo_t = torch.stack((ax, ay, az), dim=1)
+            output = self._forward_torch(pos_t, wi_t, normal_t, albedo_t, vars)
+            return output[:, 0], output[:, 1], output[:, 2]
+
+        return evaluate(
+            pos.x, pos.y, pos.z,
+            dirs.x, dirs.y, dirs.z,
+            normal.x, normal.y, normal.z,
+            albedo.x, albedo.y, albedo.z,
+        )

@@ -1,11 +1,20 @@
+import torch
+
 import mitsuba as mi
 import drjit as dr
-import torch
 import time
+import os
 
 from integrators.lhs_rhs import *
 
-mi.set_variant("cuda_rgb")
+mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
+
+
+def sync_drjit():
+    sync = getattr(dr, "sync_device", None)
+    if sync is None:
+        sync = dr.sync_thread
+    sync()
 
 
 class LHSIntegrator(mi.SamplingIntegrator):
@@ -20,10 +29,10 @@ class LHSIntegrator(mi.SamplingIntegrator):
         self,
         scene: mi.Scene,
         sampler: mi.Sampler,
-        ray: mi.RayDifferential3f,
+        ray: mi.Ray3f,
         medium: mi.Medium = None,
         active: bool = True
-    ) -> tuple[mi.Color3f, bool, list[float]]:
+    ) -> tuple[mi.Color3f, mi.Bool]:
 
         self.model.eval()
         with torch.no_grad():
@@ -31,10 +40,11 @@ class LHSIntegrator(mi.SamplingIntegrator):
             ray = mi.Ray3f(ray)
 
             si, throughput, null_face, _ = first_smooth(scene, sampler, ray, active)
-            dr.sync_device()
-            L, _, _, valid = render_lhs(scene, self.v, si, self.model)
+            sync_drjit()
+            L, _, _, valid = render_lhs(
+                scene, self.v, si, self.model, use_mitsuba_model=True)
 
-        return L * throughput, valid & ~null_face, []
+        return L * throughput, valid & ~null_face
 
 
 class RHSIntegrator(mi.SamplingIntegrator):
@@ -49,10 +59,10 @@ class RHSIntegrator(mi.SamplingIntegrator):
         self,
         scene: mi.Scene,
         sampler: mi.Sampler,
-        ray: mi.RayDifferential3f,
+        ray: mi.Ray3f,
         medium: mi.Medium = None,
         active: bool = True
-    ) -> tuple[mi.Color3f, bool, list[float]]:
+    ) -> tuple[mi.Color3f, mi.Bool]:
 
         self.model.eval()
         with torch.no_grad():
@@ -60,10 +70,11 @@ class RHSIntegrator(mi.SamplingIntegrator):
             ray = mi.Ray3f(ray)
 
             si, throughput, null_face, _ = first_smooth(scene, sampler, ray, active)
-            dr.sync_device()
-            L, _, _, _, valid = render_rhs(scene, self.v, sampler, si, self.model)
+            sync_drjit()
+            L, _, _, _, valid = render_rhs(
+                scene, self.v, sampler, si, self.model, use_mitsuba_model=True)
 
-        return L * throughput, valid & ~null_face, []
+        return L * throughput, valid & ~null_face
 
 
 class PTIntegrator(mi.SamplingIntegrator):
@@ -76,13 +87,13 @@ class PTIntegrator(mi.SamplingIntegrator):
         self,
         scene: mi.Scene,
         sampler: mi.Sampler,
-        ray: mi.RayDifferential3f,
+        ray: mi.Ray3f,
         medium: mi.Medium = None,
         active: bool = True
-    ) -> tuple[mi.Color3f, bool, list[float]]:
+    ) -> tuple[mi.Color3f, mi.Bool]:
 
         ray = mi.Ray3f(ray)
-        si = scene.ray_intersect(ray, active)
+        si = scene.ray_intersect(ray, active_mask(active))
         L, valid = render_pt(scene, sampler, si)
         
-        return L, valid, []
+        return L, valid

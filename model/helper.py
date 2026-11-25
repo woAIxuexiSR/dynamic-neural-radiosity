@@ -33,6 +33,11 @@ def get_model(name, path, *args):
 
     model = model.cuda()
     if path != "":
-        model.load_state_dict(torch.load(path))
+        try:
+            state_dict = torch.load(path, weights_only=False)
+        except TypeError:
+            # Compatibility with PyTorch versions before the weights_only option.
+            state_dict = torch.load(path)
+        model.load_state_dict(state_dict)
 
     return model

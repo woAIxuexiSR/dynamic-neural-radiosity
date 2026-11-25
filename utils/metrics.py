@@ -1,8 +1,9 @@
 import mitsuba as mi
 import numpy as np
 import argparse
+import os
 
-mi.set_variant("cuda_rgb")
+mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
 
 EPSILON = 1e-2
 

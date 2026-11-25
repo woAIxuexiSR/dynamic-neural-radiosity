@@ -215,7 +215,10 @@ class UI:
     def write_texture_gpu(self, img):
 
         mapping = self.bufobj.map()
-        dr.sync_device()
+        sync = getattr(dr, "sync_device", None)
+        if sync is None:
+            sync = dr.sync_thread
+        sync()
         cuda_driver.memcpy_dtod(mapping.device_ptr(),
                                 img.data_ptr(), img.numel() * 4)
         mapping.unmap()

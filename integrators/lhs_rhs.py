@@ -1,11 +1,18 @@
+import torch
+
 import mitsuba as mi
 import drjit as dr
 import numpy as np
-import torch
+import os
 
-mi.set_variant("cuda_rgb")
+mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
 
 
+def active_mask(value):
+    return bool(value) if mi.variant().startswith("scalar") else value
+
+
+@dr.syntax
 def first_smooth(
     scene: mi.Scene,
     sampler: mi.Sampler,
@@ -25,27 +32,12 @@ def first_smooth(
 
         bsdf_ctx = mi.BSDFContext()
 
-        loop = mi.Loop(
-            "first smooth surface",
-            lambda: (
-                sampler,
-                ray,
-                final_si,
-                active,
-                throughput,
-                spec_mask,
-                depth,
-                null_face
-            )
-        )
-
         max_depth = 16
-        loop.set_max_iterations(max_depth)
 
-        while loop(active):
+        while active & (depth < max_depth):
 
-            si = scene.ray_intersect(ray, active)
-            bsdf: mi.BSDF = si.bsdf(ray)
+            si = scene.ray_intersect(ray, active_mask(active))
+            bsdf: mi.BSDF = si.bsdf()
             final_si[active] = si
 
             spec_mask |= mi.has_flag(bsdf.flags(), mi.BSDFFlags.Delta) & mi.has_flag(
@@ -58,18 +50,18 @@ def first_smooth(
             null_face &= ~mi.has_flag(bsdf.flags(), mi.BSDFFlags.BackSide) & (si.wi.z < 0)
 
             active &= si.is_valid() & ~null_face & (depth < max_depth)
-            opacity = bsdf.eval_null_transmission(si) > mi.Color3f(0.98)
+            opacity = bsdf.eval_null(si) > mi.Color3f(0.98)
             active &= (~mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth)) | (
                 opacity.x & opacity.y & opacity.z
             )
 
             bsdf_sample, bsdf_weight = bsdf.sample(
-                bsdf_ctx, si, sampler.next_1d(), sampler.next_2d(), active
+                bsdf_ctx, si, sampler.next_1d(), sampler.next_2d(), active_mask(active)
             )
 
             ray = si.spawn_ray(si.to_world(bsdf_sample.wo))
-            throughput[active] *= bsdf_weight
-            depth[si.is_valid()] += 1
+            throughput *= dr.select(active, bsdf_weight, mi.Color3f(1.0))
+            depth += mi.UInt32(si.is_valid())
 
     return final_si, throughput, null_face, spec_mask
 
@@ -82,12 +74,28 @@ def extract_input(si: mi.SurfaceInteraction3f):
 
     si_view = mi.SurfaceInteraction3f(si)
     si_view.wi = mi.Point3f([0.353553, 0.353553, 0.866025])
-    albedo = si_view.bsdf().eval_diffuse_reflectance(si_view)
+    bsdf = si_view.bsdf()
+
+    diffuse_reflectance = bsdf.eval_attribute_3("diffuse_reflectance", si_view)
+    reflectance = bsdf.eval_attribute_3("reflectance", si_view)
+    has_diffuse_reflectance = bsdf.has_attribute("diffuse_reflectance")
+    has_reflectance = bsdf.has_attribute("reflectance")
+    albedo = dr.select(
+        has_diffuse_reflectance,
+        diffuse_reflectance,
+        dr.select(has_reflectance, reflectance, mi.Color3f(0.0)),
+    )
 
     return pos, dirs, normals, albedo
 
 
-def render_lhs(scene: mi.Scene, v: np.ndarray, si: mi.SurfaceInteraction3f, model):
+def render_lhs(
+    scene: mi.Scene,
+    v: np.ndarray,
+    si: mi.SurfaceInteraction3f,
+    model,
+    use_mitsuba_model: bool = False,
+):
 
 
     with dr.suspend_grad():
@@ -100,18 +108,34 @@ def render_lhs(scene: mi.Scene, v: np.ndarray, si: mi.SurfaceInteraction3f, mode
 
 
         pos, dirs, normals, albedo = extract_input(si)
-        out = model(pos, dirs, normals, albedo, v)
+        if use_mitsuba_model:
+            out = model.forward_mitsuba(pos, dirs, normals, albedo, v)
+            out_mi = mi.Color3f(*out)
+        else:
+            out = model(pos, dirs, normals, albedo, v)
+            out_mi = mi.Color3f(
+                mi.Float(out[:, 0].contiguous()),
+                mi.Float(out[:, 1].contiguous()),
+                mi.Float(out[:, 2].contiguous()),
+            )
 
-        not_emitter = dr.eq(Le, mi.Color3f(0.0))
-        active_nr = valid & not_emitter.x & not_emitter.y & not_emitter.z
+        not_emitter = (Le.x == 0.0) & (Le.y == 0.0) & (Le.z == 0.0)
+        active_nr = valid & not_emitter
 
-        L = Le + dr.select(active_nr, mi.Color3f(out), mi.Color3f(0.0))
+        L = Le + dr.select(active_nr, out_mi, mi.Color3f(0.0))
 
     # mi.Color3f, mi.Color3f, torch.Tensor, mi.Bool
     return L, Le, out, active_nr
 
 
-def render_rhs(scene: mi.Scene, v: np.ndarray, sampler: mi.Sampler, si: mi.SurfaceInteraction3f, model):
+def render_rhs(
+    scene: mi.Scene,
+    v: np.ndarray,
+    sampler: mi.Sampler,
+    si: mi.SurfaceInteraction3f,
+    model,
+    use_mitsuba_model: bool = False,
+):
 
     si: mi.SurfaceInteraction3f = mi.SurfaceInteraction3f(si)
     ray: mi.Ray3f = mi.Ray3f(si.p, si.to_world(si.wi))
@@ -131,20 +155,18 @@ def render_rhs(scene: mi.Scene, v: np.ndarray, sampler: mi.Sampler, si: mi.Surfa
 
     # ---------------------- Direct emission ----------------------
 
-    mis_weight = mi.Float(1.0)
-
-    mis_weight[~prev_bsdf_delta] = 0.0
+    mis_weight = dr.select(prev_bsdf_delta, mi.Float(1.0), mi.Float(0.0))
 
     ds: mi.DirectionSample3f = mi.DirectionSample3f(
         scene, si, prev_si)
     em_pdf = mi.Float(0.0)
 
     em_pdf = scene.pdf_emitter_direction(
-        prev_si, ds, ~prev_bsdf_delta)
+        prev_si, ds, active_mask(~prev_bsdf_delta))
 
     mis_bsdf = dr.detach(
         dr.select(prev_bsdf_pdf > 0, prev_bsdf_pdf / (prev_bsdf_pdf + em_pdf), 0))
-    mis_weight[~prev_bsdf_delta] = mis_bsdf
+    mis_weight = dr.select(prev_bsdf_delta, mi.Float(1.0), mis_bsdf)
 
     result = dr.fma(
         throughput,
@@ -154,7 +176,7 @@ def render_rhs(scene: mi.Scene, v: np.ndarray, sampler: mi.Sampler, si: mi.Surfa
 
     active_next = si.is_valid()
 
-    bsdf: mi.BSDF = si.bsdf(ray)
+    bsdf: mi.BSDF = si.bsdf()
 
     # ---------------------- Emitter sampling ----------------------
 
@@ -162,7 +184,7 @@ def render_rhs(scene: mi.Scene, v: np.ndarray, sampler: mi.Sampler, si: mi.Surfa
         bsdf.flags(), mi.BSDFFlags.Smooth)
 
     ds, em_weight = scene.sample_emitter_direction(
-        si, sampler.next_2d(), True, active_em
+        si, sampler.next_2d(), True, active_mask(active_em)
     )
 
     wo = si.to_local(ds.d)
@@ -182,8 +204,10 @@ def render_rhs(scene: mi.Scene, v: np.ndarray, sampler: mi.Sampler, si: mi.Surfa
     mi_em = dr.select(ds.delta, 1.0, dr.detach(
         dr.select((ds.pdf > 0) & (bsdf_pdf > 0), ds.pdf / (ds.pdf + bsdf_pdf), 0)))
 
-    result[active_em] = dr.fma(
-        throughput, bsdf_val * em_weight * mi_em, result)
+    result = dr.select(
+        active_em,
+        dr.fma(throughput, bsdf_val * em_weight * mi_em, result),
+        result)
 
     # ---------------------- BSDF sampling ----------------------
 
@@ -207,22 +231,20 @@ def render_rhs(scene: mi.Scene, v: np.ndarray, sampler: mi.Sampler, si: mi.Surfa
 
     active = active_next
 
-    si = scene.ray_intersect(ray, active)
+    si = scene.ray_intersect(ray, active_mask(active))
 
-    mis_weight = mi.Float(1.0)
-
-    mis_weight[~prev_bsdf_delta] = 0.0
+    mis_weight = dr.select(prev_bsdf_delta, mi.Float(1.0), mi.Float(0.0))
 
     ds: mi.DirectionSample3f = mi.DirectionSample3f(
         scene, si, prev_si)
     em_pdf = mi.Float(0.0)
 
     em_pdf = scene.pdf_emitter_direction(
-        prev_si, ds, ~prev_bsdf_delta)
+        prev_si, ds, active_mask(~prev_bsdf_delta))
 
     mis_bsdf = dr.detach(
         dr.select(prev_bsdf_pdf > 0, prev_bsdf_pdf / (prev_bsdf_pdf + em_pdf), 0))
-    mis_weight[~prev_bsdf_delta] = mis_bsdf
+    mis_weight = dr.select(prev_bsdf_delta, mi.Float(1.0), mis_bsdf)
 
     si, throughput2, null_face, _ = first_smooth(scene, sampler, ray, active)
     throughput *= throughput2
@@ -233,23 +255,33 @@ def render_rhs(scene: mi.Scene, v: np.ndarray, sampler: mi.Sampler, si: mi.Surfa
         result
     )
 
-    not_emitter = dr.eq(si.emitter(scene).eval(si), mi.Color3f(0.0))
-    active_nr = active & ~null_face & si.is_valid(
-    ) & not_emitter.x & not_emitter.y & not_emitter.z
+    emission = si.emitter(scene).eval(si)
+    not_emitter = (emission.x == 0.0) & (emission.y == 0.0) & (emission.z == 0.0)
+    active_nr = active & ~null_face & si.is_valid() & not_emitter
 
     pos, dirs, normals, albedo = extract_input(si)
-    out = model(pos, dirs, normals, albedo, v)
+    if use_mitsuba_model:
+        out = model.forward_mitsuba(pos, dirs, normals, albedo, v)
+        out_mi = mi.Color3f(*out)
+    else:
+        out = model(pos, dirs, normals, albedo, v)
+        out_mi = mi.Color3f(
+            mi.Float(out[:, 0].contiguous()),
+            mi.Float(out[:, 1].contiguous()),
+            mi.Float(out[:, 2].contiguous()),
+        )
 
     Le = mi.Color3f(result)
     result = dr.fma(
         throughput,
-        dr.select(active_nr, mi.Color3f(out), mi.Color3f(0.0)),
+        dr.select(active_nr, out_mi, mi.Color3f(0.0)),
         result
     )
 
     return result, Le, out, throughput, active_nr
 
 
+@dr.syntax
 def render_pt(scene: mi.Scene, sampler: mi.Sampler, si: mi.SurfaceInteraction3f):
 
     si: mi.SurfaceInteraction3f = mi.SurfaceInteraction3f(si)
@@ -267,46 +299,26 @@ def render_pt(scene: mi.Scene, sampler: mi.Sampler, si: mi.SurfaceInteraction3f)
     prev_bsdf_delta = mi.Bool(True)
     bsdf_ctx = mi.BSDFContext()
 
-    loop = mi.Loop(
-        "Path Tracer",
-        lambda: (
-            sampler,
-            ray,
-            si,
-            throughput,
-            result,
-            depth,
-            valid_ray,
-            prev_si,
-            prev_bsdf_pdf,
-            prev_bsdf_delta,
-            active,
-        )
-    )
-
     max_depth = 8
-    loop.set_max_iterations(max_depth)
 
-    while loop(active):
+    while active & (depth < max_depth):
 
         # si: mi.SurfaceInteraction3f = scene.ray_intersect(ray)
 
         # ---------------------- Direct emission ----------------------
 
-        mis_weight = mi.Float(1.0)
-
-        mis_weight[~prev_bsdf_delta] = 0.0
+        mis_weight = dr.select(prev_bsdf_delta, mi.Float(1.0), mi.Float(0.0))
 
         ds: mi.DirectionSample3f = mi.DirectionSample3f(
             scene, si, prev_si)
         em_pdf = mi.Float(0.0)
 
         em_pdf = scene.pdf_emitter_direction(
-            prev_si, ds, ~prev_bsdf_delta)
+            prev_si, ds, active_mask(~prev_bsdf_delta))
 
         mis_bsdf = dr.detach(
             dr.select(prev_bsdf_pdf > 0, prev_bsdf_pdf / (prev_bsdf_pdf + em_pdf), 0))
-        mis_weight[~prev_bsdf_delta] = mis_bsdf
+        mis_weight = dr.select(prev_bsdf_delta, mi.Float(1.0), mis_bsdf)
 
         result = dr.fma(
             throughput,
@@ -316,7 +328,7 @@ def render_pt(scene: mi.Scene, sampler: mi.Sampler, si: mi.SurfaceInteraction3f)
 
         active_next = ((depth + 1) < max_depth) & si.is_valid()
 
-        bsdf: mi.BSDF = si.bsdf(ray)
+        bsdf: mi.BSDF = si.bsdf()
 
         # ---------------------- Emitter sampling ----------------------
 
@@ -324,7 +336,7 @@ def render_pt(scene: mi.Scene, sampler: mi.Sampler, si: mi.SurfaceInteraction3f)
             bsdf.flags(), mi.BSDFFlags.Smooth)
 
         ds, em_weight = scene.sample_emitter_direction(
-            si, sampler.next_2d(), True, active_em
+            si, sampler.next_2d(), True, active_mask(active_em)
         )
 
         wo = si.to_local(ds.d)
@@ -346,8 +358,10 @@ def render_pt(scene: mi.Scene, sampler: mi.Sampler, si: mi.SurfaceInteraction3f)
         mi_em = dr.select(ds.delta, 1.0, dr.detach(
             dr.select(ds.pdf > 0, ds.pdf / (ds.pdf + bsdf_pdf), 0)))
 
-        result[active_em] = dr.fma(
-            throughput, bsdf_val * em_weight * mi_em, result)
+        result = dr.select(
+            active_em,
+            dr.fma(throughput, bsdf_val * em_weight * mi_em, result),
+            result)
 
         # ---------------------- BSDF sampling ----------------------
 
@@ -372,7 +386,7 @@ def render_pt(scene: mi.Scene, sampler: mi.Sampler, si: mi.SurfaceInteraction3f)
 
         # -------------------- Stopping criterion ---------------------
 
-        depth[si.is_valid()] += 1
+        depth += mi.UInt32(si.is_valid())
 
         throughput_max = dr.max(throughput)
 
@@ -380,13 +394,14 @@ def render_pt(scene: mi.Scene, sampler: mi.Sampler, si: mi.SurfaceInteraction3f)
         rr_active = (depth >= 3)
         rr_continue = (sampler.next_1d() < rr_prop)
 
-        throughput[rr_active] *= dr.rcp(rr_prop)
+        throughput *= dr.select(
+            rr_active, dr.rcp(rr_prop), mi.Color3f(1.0))
 
         active = (
             active_next & (~rr_active | rr_continue) & (
-                dr.neq(throughput_max, 0.0))
+                throughput_max != 0.0)
         )
 
-        si = scene.ray_intersect(ray, active_next)
+        si = scene.ray_intersect(ray, active_mask(active_next))
 
     return dr.select(valid_ray, result, 0.0), valid_ray

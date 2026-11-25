@@ -1,3 +1,7 @@
+import torch
+import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
+
 import mitsuba as mi
 import drjit as dr
 import matplotlib.pyplot as plt
@@ -8,9 +12,6 @@ import gc
 import json
 import argparse
 
-import torch
-import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
 import tinycudann as tcnn
 
 from integrators.lhs_rhs import *
@@ -68,9 +69,9 @@ def train(dscene, model, surface_weight, surface_mask, config, out_dir):
 
         valid_lhs = valid_lhs.torch().bool()
         out_lhs[~valid_lhs] = 0.0
-        lhs = Le_lhs.torch() + out_lhs
+        lhs = Le_lhs.torch().transpose(0, 1) + out_lhs
 
-        rhs = L_rhs.torch()
+        rhs = L_rhs.torch().transpose(0, 1)
         rhs = rhs.reshape(batch_size, M, 3)
 
         loss = loss_fn(lhs, rhs)
@@ -112,7 +113,7 @@ if __name__ == "__main__":
 
     # prepare scene
 
-    scene = mi.load_file(config["scene"])
+    scene = mi.load_file(config["scene"], optimize=False)
     mask, m_area = compute_area(scene)
     bbox = scene.bbox()
 

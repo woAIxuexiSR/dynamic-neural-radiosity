@@ -1,2 +1,0 @@
-pretained_model/dining-room/model.pth filter=lfs diff=lfs merge=lfs -text
-*.pth filter=lfs diff=lfs merge=lfs -text

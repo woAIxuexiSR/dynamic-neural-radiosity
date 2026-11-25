@@ -1,18 +1,19 @@
+import torch
+
 import mitsuba as mi
 import drjit as dr
 import numpy as np
 import json
 import argparse
 import imgui
-
-import torch
+import os
 
 from utils.ui import UI
 from model.helper import *
 from dscene.dscene import DynamicScene
 from integrators.integrator import *
 
-mi.set_variant("cuda_rgb")
+mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
 
 if __name__ == "__main__":
 
@@ -25,7 +26,7 @@ if __name__ == "__main__":
 
     # prepare scene
 
-    scene: mi.Scene = mi.load_file(config["scene"])
+    scene: mi.Scene = mi.load_file(config["scene"], optimize=False)
     bbox = scene.bbox()
 
     dscene = DynamicScene(scene)

@@ -1,13 +1,14 @@
+import torch
+
 import mitsuba as mi
 import drjit as dr
-import torch
 import numpy as np
 import json
-import imgui
+import os
 
 from dscene.camera import FPSCamera, MovingCamera
 
-mi.set_variant("cuda_rgb")
+mi.set_variant(os.environ.get("MITSUBA_VARIANT", "cuda_rgb"))
 
 
 def val_to_str(value):
@@ -33,8 +34,23 @@ class DynamicScene:
         self.multi_move_vars = {}
         self.is_obj = {}
         self.initial_state = {}
+        self.position_keys = {}
 
-        cam_transform = self.params["PerspectiveCamera.to_world"]
+        camera_prefixes = {
+            key.rsplit(".", 1)[0]
+            for key in self.params.keys()
+            if key.endswith(".x_fov")
+        }
+        if len(camera_prefixes) != 1:
+            raise RuntimeError(
+                "Expected exactly one perspective camera in scene parameters, "
+                f"found: {sorted(camera_prefixes)}"
+            )
+        self.camera_prefix = camera_prefixes.pop()
+        self.camera_to_world_key = self.camera_prefix + ".to_world"
+        self.camera_fov_key = self.camera_prefix + ".x_fov"
+
+        cam_transform = self.params[self.camera_to_world_key]
         cam_transform = np.array(cam_transform.matrix).reshape(4, 4)
         bbox = scene.bbox()
         cam_speed = 0.01 * np.array(bbox.max - bbox.min).mean()
@@ -79,8 +95,59 @@ class DynamicScene:
 
         if shape_name in self.initial_state:
             return
-        self.initial_state[shape_name] = dr.unravel(mi.Point3f,
-                                                    self.params[shape_name + ".vertex_positions"])
+        position_key = self._parameter_key(shape_name + ".vertex_positions", required=False)
+        if position_key is None:
+            position_key = self._parameter_key(shape_name + ".positions")
+            self.initial_state[shape_name] = mi.TensorXf(self.params[position_key])
+        else:
+            self.initial_state[shape_name] = dr.unravel(
+                mi.Point3f, self.params[position_key])
+        self.position_keys[shape_name] = position_key
+
+    def _parameter_key(self, key, required=True):
+        if key in self.params.keys():
+            return key
+
+        prefix, suffix = key.rsplit(".", 1)
+        matches = [
+            candidate for candidate in self.params.keys()
+            if candidate.startswith(prefix + "_") and candidate.endswith("." + suffix)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if required:
+            raise KeyError(key)
+        return None
+
+    def _set_obj_positions(self, shape_name, positions):
+        key = self.position_keys[shape_name]
+        if key.endswith(".positions"):
+            self.params[key] = mi.TensorXf(positions)
+        else:
+            self.params[key] = dr.ravel(positions)
+
+    def _transform_tensor_positions(self, positions, transform):
+        matrix = transform.matrix
+        result = mi.TensorXf(positions)
+        x = positions[:, 0]
+        y = positions[:, 1]
+        z = positions[:, 2]
+        result[:, 0] = (
+            matrix[0, 0] * x + matrix[0, 1] * y + matrix[0, 2] * z + matrix[0, 3]
+        )
+        result[:, 1] = (
+            matrix[1, 0] * x + matrix[1, 1] * y + matrix[1, 2] * z + matrix[1, 3]
+        )
+        result[:, 2] = (
+            matrix[2, 0] * x + matrix[2, 1] * y + matrix[2, 2] * z + matrix[2, 3]
+        )
+        return result
+
+    def _transform_obj_positions(self, shape_name, transform):
+        positions = self.initial_state[shape_name]
+        if self.position_keys[shape_name].endswith(".positions"):
+            return self._transform_tensor_positions(positions, transform)
+        return transform @ positions
 
     # only support vector or scalar, {idx: (param_name, start, end)}
     def add_common_animation(self, param_name, start, end):
@@ -93,7 +160,8 @@ class DynamicScene:
     def add_translate_animation(self, shape_names, start, end):
         start, end = mi.Vector3f(start), mi.Vector3f(end)
         for shape_name in shape_names:
-            _is_obj = (self.params.get(shape_name + ".to_world") is None)
+            _is_obj = self._parameter_key(
+                shape_name + ".to_world", required=False) is None
             self.is_obj[shape_name] = _is_obj
             self.add_initial_state(_is_obj, shape_name)
         self.translate_vars[self.var_num] = (shape_names, start, end)
@@ -103,7 +171,8 @@ class DynamicScene:
     def add_rotate_animation(self, shape_names, axis, translation, start, end):
         axis, translation = mi.Vector3f(axis), mi.Vector3f(translation)
         for shape_name in shape_names:
-            _is_obj = (self.params.get(shape_name + ".to_world") is None)
+            _is_obj = self._parameter_key(
+                shape_name + ".to_world", required=False) is None
             self.is_obj[shape_name] = _is_obj
             self.add_initial_state(_is_obj, shape_name)
         self.rotate_vars[self.var_num] = (
@@ -113,7 +182,8 @@ class DynamicScene:
     # scalar, {idx: (shape_names, start, end)}
     def add_scale_animation(self, shape_names, start, end):
         for shape_name in shape_names:
-            _is_obj = (self.params.get(shape_name + ".to_world") is None)
+            _is_obj = self._parameter_key(
+                shape_name + ".to_world", required=False) is None
             self.is_obj[shape_name] = _is_obj
             self.add_initial_state(_is_obj, shape_name)
         self.scale_vars[self.var_num] = (shape_names, start, end)
@@ -127,19 +197,21 @@ class DynamicScene:
             T = np.array(init_trans).reshape(4, 4)
             T = mi.Transform4f(T)
         for shape_name in shape_names:
-            _is_obj = (self.params.get(shape_name + ".to_world") is None)
+            _is_obj = self._parameter_key(
+                shape_name + ".to_world", required=False) is None
             self.is_obj[shape_name] = _is_obj
             if _is_obj:
-                self.params[shape_name + ".vertex_positions"] = dr.ravel(T @
-                    dr.unravel(mi.Point3f, self.params[shape_name + ".vertex_positions"])
-                )
+                if init_trans is not None:
+                    self.add_initial_state(_is_obj, shape_name)
+                    self._set_obj_positions(
+                        shape_name, self._transform_obj_positions(shape_name, T))
             self.add_initial_state(_is_obj, shape_name)
         self.multi_move_vars[self.var_num] = (shape_names, starts, ends)
         self.var_num += 1
 
     def apply_obj_transformation(self, shape_name, T):
-        self.params[shape_name +
-                    ".vertex_positions"] = dr.ravel(T @ self.initial_state[shape_name])
+        self._set_obj_positions(
+            shape_name, self._transform_obj_positions(shape_name, T))
 
     # v : list of [0, 1] that represents the progress of each animation
     def update(self, v: np.ndarray, changed=True):
@@ -171,9 +243,10 @@ class DynamicScene:
                 T = mi.Transform4f.translate(c)
                 self.apply_obj_transformation(shape_name, T)
             else:
-                mat = self.params[shape_name + ".to_world"].matrix
+                transform_key = self._parameter_key(shape_name + ".to_world")
+                mat = self.params[transform_key].matrix
                 mat[3] = mi.Vector4f(c.x, c.y, c.z, 1)
-                self.params[shape_name + ".to_world"] = mi.Transform4f(mat)
+                self.params[transform_key] = mi.Transform4f(mat)
 
         # update rotate
         for idx, (shape_names, axis, translation, start, end) in self.rotate_vars.items():
@@ -185,7 +258,8 @@ class DynamicScene:
                 if self.is_obj[shape_name]:
                     self.apply_obj_transformation(shape_name, T)
                 else:
-                    self.params[shape_name + ".to_world"] = T
+                    transform_key = self._parameter_key(shape_name + ".to_world")
+                    self.params[transform_key] = T
 
         # update scale
         for idx, (shape_names, start, end) in self.scale_vars.items():
@@ -196,14 +270,15 @@ class DynamicScene:
                     T = mi.Transform4f.scale(c)
                     self.apply_obj_transformation(shape_name, T)
                 else:
-                    mat = self.params[shape_name + ".to_world"]
+                    transform_key = self._parameter_key(shape_name + ".to_world")
+                    mat = self.params[transform_key]
                     translate = mat.translation()
                     
                     res = mi.Transform4f.scale(c)
                     res = mi.Matrix4f(res.matrix)
                     res[3] = mi.Vector4f(
                         translate.x, translate.y, translate.z, 1.0)
-                    self.params[shape_name + ".to_world"] = mi.Transform4f(res)
+                    self.params[transform_key] = mi.Transform4f(res)
                     
         # update multi-move
         multi_move_states = {}
@@ -222,36 +297,38 @@ class DynamicScene:
                 T = mi.Transform4f.translate(c)
                 self.apply_obj_transformation(shape_name, T)
             else:
-                mat = self.params[shape_name + ".to_world"].matrix
+                transform_key = self._parameter_key(shape_name + ".to_world")
+                mat = self.params[transform_key].matrix
                 mat[3] = mi.Vector4f(c.x, c.y, c.z, 1)
-                self.params[shape_name + ".to_world"] = mi.Transform4f(mat)
+                self.params[transform_key] = mi.Transform4f(mat)
 
         # update camera
         if self.active_moving_camera:
-            self.params["PerspectiveCamera.to_world"] = self.moving_Camera.get_transform(
+            self.params[self.camera_to_world_key] = self.moving_Camera.get_transform(
                 self.camera_v)
 
         self.params.update()
         self.v = v
 
     def render_ui(self):
+        import imgui
 
         changed = False
 
         if imgui.tree_node("Camera Control", imgui.TREE_NODE_DEFAULT_OPEN):
 
-            fov = self.params["PerspectiveCamera.x_fov"]
+            fov = self.params[self.camera_fov_key]
             _, fov = imgui.slider_float("fov", fov[0], 10, 90, "%.1f")
-            self.params["PerspectiveCamera.x_fov"] = fov
+            self.params[self.camera_fov_key] = fov
 
             if self.active_moving_camera:
                 _, v = imgui.slider_float(
                     "camera v", self.camera_v, 0, 1, "%.2f")
                 self.camera_v = v
-                self.params["PerspectiveCamera.to_world"] = self.moving_Camera.get_transform(
+                self.params[self.camera_to_world_key] = self.moving_Camera.get_transform(
                     self.camera_v)
             else:
-                self.params["PerspectiveCamera.to_world"] = self.camera.get_transform()
+                self.params[self.camera_to_world_key] = self.camera.get_transform()
 
                 imgui.text("pos: " + val_to_str(self.camera.pos))
                 imgui.text("front: " + val_to_str(self.camera.z))

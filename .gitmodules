@@ -1,3 +1,0 @@
-[submodule "mitsuba"]
-	path = mitsuba
-	url = https://github.com/cuteday/mitsuba3.git
