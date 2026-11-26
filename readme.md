@@ -2,6 +2,8 @@
 
 The code release for the paper "Dynamic Neural Radiosity with Multi-grid Decomposition" (SIGGRAPH Asia 2024).
 
+(The `modern-mitsuba` branch updates the project to a newer Mitsuba API, improves training speed by approximately 10x, and provides a modest inference speedup. See that branch for details.)
+
 ## Requirements
 
 **Platform**
